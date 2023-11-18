@@ -1,9 +1,20 @@
 #pragma once
 
 #include <iostream>
+#include <format>
+#include <cstring>
+#include <regex>
+#include <utility>
+
+#define CYANDB_DEBUG
+#define FUNCTION_NAME (__func__)
+
+#include "debug.hpp"
+
 #include "database.hpp"
 #include "network.hpp"
 #include "service.hpp"
+
 
 //-----------------------------------------------------------NETWORK-------------------------------------------------------------------
 
@@ -21,4 +32,5 @@ class Index;
 
 //-----------------------------------------------------------SERVICE-------------------------------------------------------------------
 
-class Console;
+class ServerConsole;
+class ClientConsole;
