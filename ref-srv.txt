@@ -1,0 +1,77 @@
+#define _XOPEN_SOURCE 700
+#include <sys/socket.h>
+#include <bits/sockaddr.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <errno.h>
+#include <signal.h>
+#include <stdbool.h>
+#include <string.h>
+#define MAX_MSG_LEN 60
+
+socklen_t sock_len = (socklen_t)16U;
+
+char buf[191];
+
+void cli_biz(int connfd, uint16_t cid){
+    pid_t pid = getpid();
+    uint16_t raw_vcd;
+    while(1){
+        int pbuf = 2;
+        while(1){
+            char c = getchar();
+            buf[pbuf++] = c;
+            if(c == '\n')
+                break;
+        }
+        buf[pbuf] = '\0';
+        if(strlen(buf + 2) > MAX_MSG_LEN + 3){
+            printf("[cli](%d) message length exceeded\n", pid);
+            return;
+        }
+        printf("[cli](%d)[cid](%d)[ECH_RQT] %s", pid, cid, buf + 2);
+        if(strcmp(buf + 2, "EXIT\n") == 0){
+            return;
+        }
+        buf[0] = *((char *)(&cid) + 1);
+        buf[1] = *(char *)&cid;
+        write(connfd, (void *)buf, strlen(buf) + 1);
+        read(connfd, (void *)&raw_vcd, 2);
+        read(connfd, (void *)(buf + 2), 112);
+        uint16_t vcd = ntohs(raw_vcd);
+        printf("[cli](%d)[vcd](%d)[ECH_REP] %s", pid, vcd, buf + 2);
+    }
+}
+
+int main(int argc, char *argv[]){
+    // ./conc_tcp_cli_echo.o 127.0.0.60 51148 934
+    // ./conc_tcp_cli_echo.o 127.0.0.60 51148 131
+    if(argc != 4){
+        printf("Usage: %s <IP> <PORT> <CID>\n", argv[0]);
+        return -1;
+    }
+    uint16_t cid = (uint16_t)atoi(argv[3]);
+    pid_t pid = getpid();
+    int connfd = socket(AF_INET, SOCK_STREAM, 0);
+    if(connfd == -1){
+        printf("[cli](%d) socket create failed\n", pid);
+        return -1;
+    }
+    struct sockaddr_in cli_sockaddr;
+    cli_sockaddr.sin_addr.s_addr = inet_addr(argv[1]);
+    cli_sockaddr.sin_family = AF_INET;
+    cli_sockaddr.sin_port = htons(atoi(argv[2]));
+    if(connect(connfd, (struct sockaddr *)&cli_sockaddr, sock_len) == -1){
+        printf("[cli](%d) socket connect failed\n", pid);
+        return -1;
+    }
+    printf("[cli](%d)[srv_sa](%s:%s) Server is connected!\n", pid, argv[1], argv[2]);
+    cli_biz(connfd, cid);
+    close(connfd);
+    printf("[cli](%d) connfd is closed!\n", pid);
+    printf("[cli](%d) Client is to return!\n", pid);
+    return 0;
+}

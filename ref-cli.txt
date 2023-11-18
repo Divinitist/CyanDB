@@ -1,0 +1,171 @@
+#define _XOPEN_SOURCE 700
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <bits/sockaddr.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <errno.h>
+#include <signal.h>
+#include <stdbool.h>
+#include <string.h>
+
+int sigint_flag = 0;
+
+void handler_sigint(int sig){
+    printf("[srv] SIGINT is coming!\n");
+    sigint_flag = 1;
+}
+
+void handler_sigchld(int sig){
+    pid_t pid_chld, pid = getpid();
+    int stat;
+    while((pid_chld = waitpid(-1, &stat, WNOHANG)) > 0){
+        printf("[srv](%d)[chd](%d) Child has terminated!\n", pid, pid_chld);
+    }
+}
+
+void handler_sigpipe(int sig){
+    pid_t pid = getpid();
+    printf("[srv](%d) SIGPIPE is coming!\n", pid);
+}
+
+/*  @brief  安装SIGINT、SIGCHLD、SIGPIPE三个信号处理器
+ *  @retval -1：SIGINT安装失败
+ *          -2：SIGCHLD安装失败
+ *          -3：SIGPIPE安装失败
+ *           0：全部安装成功  
+ */
+int install_sig_handlers(void){
+    int res = -1;
+
+    // 安装SIGINT信号处理器
+    struct sigaction sa;
+    sa.sa_flags = 0;
+    sa.sa_handler = handler_sigint;
+    sigemptyset(&sa.sa_mask);
+    res = sigaction(SIGINT, &sa, NULL);
+    if(res) return -1;
+
+    // 安装SIGCHLD信号处理器
+    struct sigaction new_chld, old_chld;
+    new_chld.sa_flags = 0;
+    new_chld.sa_handler = handler_sigchld;
+    sigemptyset(&new_chld.sa_mask);
+    res = sigaction(SIGCHLD, &new_chld, &old_chld);
+    if(res) return -2;
+
+    // 安装SIGPIPE信号处理器
+    struct sigaction new_pipe, old_pipe;
+    new_pipe.sa_flags = SA_RESTART;
+    new_pipe.sa_handler = handler_sigpipe;
+    sigemptyset(&new_pipe.sa_mask);
+    res = sigaction(SIGPIPE, &new_pipe, &old_pipe);
+    if(res) return -3;
+
+    return 0;
+}
+
+int sock_len = sizeof(struct sockaddr);
+uint16_t vcd;
+
+
+void srv_biz(int connfd){
+    pid_t pid = getpid();
+    uint16_t raw_cid;
+    char buf[114] = {0};
+    while(1){
+        ssize_t size_read = read(connfd, (void *)&raw_cid, 2);
+#ifdef DEBUG
+        printf("[debug] size_read = %ld, raw_cid = %d\n", size_read, raw_cid);
+#endif
+        if(size_read == 0) return;
+        read(connfd, (void *)(buf + 2), 112);
+#ifdef DEBUG
+        printf("[debug] buf_read = %s", buf + 2);
+#endif
+        uint16_t cid = ntohs(raw_cid);
+        printf("[chd](%d)[cid](%d)[ECH_RQT] %s", pid, cid, buf + 2);
+        buf[0] = *((char *)(&vcd) + 1);
+        buf[1] = *(char *)&vcd;
+        write(connfd, (void *)buf, strlen(buf) + 1);
+    }
+}
+
+int main(int argc, char *argv[]){
+    // ./conc_tcp_srv_echo.o 127.0.0.60 51148 510
+    if(argc != 4){
+        printf("Usage: %s <IP> <PORT> <VCD>\n", argv[0]);
+        return -1;
+    }
+    pid_t pid = getpid();
+    vcd = (uint16_t)atoi(argv[3]);
+
+    // 安装信号处理器
+    bool is_sig_install_success = !install_sig_handlers();
+    if(!is_sig_install_success){
+        printf("[srv](%d) sig installation failed\n", pid);
+        return -1;
+    }
+
+    // 创建服务器TCP套接字
+    int listenfd = socket(AF_INET, SOCK_STREAM, 0);
+    if(listenfd == -1){
+        printf("[srv](%d) socket creation failed\n", pid);
+        return -1;
+    }
+    struct sockaddr_in srv_sockaddr;
+    srv_sockaddr.sin_addr.s_addr = inet_addr(argv[1]);
+    srv_sockaddr.sin_family = AF_INET;
+    srv_sockaddr.sin_port = htons(atoi(argv[2]));
+    if(bind(listenfd, (struct sockaddr *)&srv_sockaddr, (socklen_t )sock_len) == -1){
+        printf("[srv](%d) socket bind failed\n", pid);
+        close(listenfd);
+        return -1;
+    }
+    if(listen(listenfd, SOMAXCONN) == -1){
+        printf("[srv](%d) socket listen failed\n", pid);
+        close(listenfd);
+        return -1;
+    }
+
+    printf("[srv](%d)[srv_sa](%s:%s)[vcd](%s) Server has initialized!\n", pid, argv[1], argv[2], argv[3]);
+
+    while(!sigint_flag){
+        struct sockaddr_in cli_sockaddr;
+        int connfd;
+        if((connfd = accept(listenfd, (struct sockaddr *)&cli_sockaddr, (socklen_t *)&sock_len)) < 0){
+            if(errno == EINTR) continue;
+            else{
+                printf("[srv](%d) socket connect failed\n", pid);
+                close(listenfd);
+                return -1;
+            }
+        }
+        char *cli_ip = inet_ntoa(cli_sockaddr.sin_addr);
+        uint16_t cli_port = (uint16_t)(cli_sockaddr.sin_port);
+        printf("[srv](%d)[cli_sa](%s:%d) Client is accepted!\n", pid, cli_ip, cli_port);
+        pid_t pid_chld = fork();
+        if(!pid_chld){
+            pid = getpid();
+            pid_t ppid = getppid();
+            printf("[chd](%d)[ppid](%d) Child process is created!\n", pid, ppid);
+            close(listenfd);
+            srv_biz(connfd);
+            printf("[chd](%d)[ppid](%d)[cli_sa](%s:%d) Client is closed!\n", pid, ppid, cli_ip, cli_port);
+            close(connfd);
+            printf("[chd](%d)[ppid](%d) connfd is closed!\n", pid, ppid);
+            printf("[chd](%d)[ppid](%d) Child process is to return!\n", pid, ppid);
+            return 0;
+        }
+        else{
+            pid = getpid();
+            close(connfd);
+            continue;
+        }
+    }
+    close(listenfd);
+    return 0;
+}
